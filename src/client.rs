@@ -237,7 +237,11 @@ impl Client {
         let chunks = user_ids.chunks(USER_LOOKUP_PAGE_SIZE);
 
         for chunk in chunks {
-            lookups.push(egg_mode::user::lookup(chunk.to_vec(), token).boxed_local());
+            lookups.push(
+                egg_mode::user::lookup(chunk.to_vec(), token)
+                    .map(recover_user_lookup)
+                    .boxed_local(),
+            );
         }
 
         self.choose_limit_tracker(token_type)
@@ -260,7 +264,11 @@ impl Client {
         let chunks = user_ids.chunks(USER_LOOKUP_PAGE_SIZE);
 
         for chunk in chunks {
-            lookups.push(user_lookup_json(chunk.to_vec(), token).boxed_local());
+            lookups.push(
+                user_lookup_json(chunk.to_vec(), token)
+                    .map(recover_user_lookup)
+                    .boxed_local(),
+            );
         }
 
         self.choose_limit_tracker(token_type)
@@ -288,12 +296,7 @@ impl Client {
                                     ref headers,
                                     TwitterErrors { ref errors },
                                 ) if errors.len() == 1 => {
-                                    // We just use the defaults if the headers are malformed for some reason.
-                                    let limit = RateLimit::try_from(headers).unwrap_or(RateLimit {
-                                        limit: -1,
-                                        remaining: -1,
-                                        reset: -1,
-                                    });
+                                    let limit = extract_rate_limit(headers);
 
                                     // If the error code isn't 50 or 63 we just pass along the
                                     // error.
@@ -427,4 +430,31 @@ async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
     let request = egg_mode::raw::request_post(USER_LOOKUP_URL, token, Some(&params));
 
     egg_mode::raw::response_json(request).await
+}
+
+/// We just use the defaults if the headers are malformed for some reason.
+fn extract_rate_limit(headers: &egg_mode::raw::Headers) -> RateLimit {
+    RateLimit::try_from(headers).unwrap_or(RateLimit {
+        limit: -1,
+        remaining: -1,
+        reset: -1,
+    })
+}
+
+/// Recover from "No user matches" errors.
+fn recover_user_lookup<T>(
+    result: EggModeResult<Response<Vec<T>>>,
+) -> EggModeResult<Response<Vec<T>>> {
+    result.or_else(|error| match error {
+        EggModeError::TwitterError(ref headers, TwitterErrors { ref errors }) => {
+            if errors.len() == 1 && errors[0].code == 17 {
+                let limit = extract_rate_limit(headers);
+
+                Ok(Response::new(limit, vec![]))
+            } else {
+                Err(error)
+            }
+        }
+        other => Err(other),
+    })
 }

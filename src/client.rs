@@ -435,7 +435,7 @@ async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
 }
 
 /// We just use the defaults if the headers are malformed for some reason.
-pub fn extract_rate_limit(headers: &egg_mode::raw::Headers) -> RateLimit {
+fn extract_rate_limit(headers: &egg_mode::raw::Headers) -> RateLimit {
     RateLimit::try_from(headers).unwrap_or(RateLimit {
         limit: -1,
         remaining: -1,

@@ -16,6 +16,8 @@ use std::time::Duration;
 
 pub type EggModeResult<T> = Result<T, EggModeError>;
 
+const NO_USER_MATCHES_ERROR_CODE: i32 = 17;
+
 const TWEET_LOOKUP_PAGE_SIZE: usize = 100;
 const TWEET_LOOKUP_PARALLELISM: usize = 100;
 const USER_FOLLOWER_IDS_PAGE_SIZE: i32 = 5000;
@@ -433,7 +435,7 @@ async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
 }
 
 /// We just use the defaults if the headers are malformed for some reason.
-fn extract_rate_limit(headers: &egg_mode::raw::Headers) -> RateLimit {
+pub fn extract_rate_limit(headers: &egg_mode::raw::Headers) -> RateLimit {
     RateLimit::try_from(headers).unwrap_or(RateLimit {
         limit: -1,
         remaining: -1,
@@ -447,7 +449,7 @@ fn recover_user_lookup<T>(
 ) -> EggModeResult<Response<Vec<T>>> {
     result.or_else(|error| match error {
         EggModeError::TwitterError(ref headers, TwitterErrors { ref errors }) => {
-            if errors.len() == 1 && errors[0].code == 17 {
+            if errors.len() == 1 && errors[0].code == NO_USER_MATCHES_ERROR_CODE {
                 let limit = extract_rate_limit(headers);
 
                 Ok(Response::new(limit, vec![]))

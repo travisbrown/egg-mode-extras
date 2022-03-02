@@ -287,7 +287,7 @@ impl Client {
             .boxed_local()
     }
 
-    /// Stream user JSON objects (or their IDs if they are unavailable).
+    /// Stream user JSON objects.
     pub fn lookup_users_json<T: Into<UserID> + Unpin + Send, I: IntoIterator<Item = T>>(
         &self,
         accounts: I,
@@ -298,7 +298,7 @@ impl Client {
             .boxed_local()
     }
 
-    /// Stream user JSON objects (or their IDs if they are unavailable).
+    /// Stream user JSON objects (or their statuses if they are unavailable).
     pub fn lookup_users_json_or_status<
         T: Into<UserID> + Unpin + Send,
         I: IntoIterator<Item = T>,
@@ -343,7 +343,9 @@ impl Client {
         futures::stream::select(values, missing).boxed_local()
     }
 
-    /// Stream either user profiles or former user statuses.
+    /// Stream users (or their statuses if they are unavailable).
+    ///
+    /// Note that `lookup_users_json_or_status` will generally be more efficient.
     pub fn lookup_users_or_status<T: Into<UserID> + Unpin + Send, I: IntoIterator<Item = T>>(
         &self,
         accounts: I,

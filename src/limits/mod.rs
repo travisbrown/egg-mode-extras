@@ -1,6 +1,7 @@
 mod method_limit;
 mod stream;
 
+use stream::ResponseFuture;
 pub use stream::{Pageable, TimelineScrollback};
 
 use super::method::Method;
@@ -9,7 +10,7 @@ use egg_mode::{
     service::rate_limit_status,
     Token,
 };
-use futures::{stream::LocalBoxStream, StreamExt, TryStreamExt};
+use futures::{stream::LocalBoxStream, Stream, StreamExt, TryStreamExt};
 use std::time::Duration;
 
 const OVER_CAPACITY_DELAY_SECS: u64 = 60;
@@ -50,6 +51,10 @@ impl RateLimitTracker {
                         res
                     } else {
                         if is_over_capacity {
+                            log::warn!(
+                                "Waiting for {:?} after over capacity error",
+                                over_capacity_delay
+                            );
                             tokio::time::sleep(over_capacity_delay).await;
                         }
 
@@ -94,5 +99,52 @@ impl RateLimitTracker {
         .map_ok(|items| futures::stream::iter(items).map(Ok))
         .try_flatten()
         .boxed_local()
+    }
+
+    pub fn wrap_stream<'a, T: 'a, S: Stream<Item = ResponseFuture<'a, T>> + 'a>(
+        &self,
+        stream: S,
+        method: &Method,
+        ignore_over_capacity_errors: bool,
+    ) -> LocalBoxStream<'a, Result<T, Error>> {
+        let limit = self.limits.get(method);
+        let over_capacity_delay = self.over_capacity_delay;
+
+        stream
+            .filter_map(move |future| {
+                let limit = limit.clone();
+                async move {
+                    if let Some(delay) = limit.wait_duration() {
+                        log::warn!(
+                            "Waiting for {:?} for rate limit reset at {:?}",
+                            delay,
+                            limit.reset_time()
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    limit.decrement();
+
+                    match future.await {
+                        Ok(response) => Some(Ok(response.response)),
+                        Err(Error::TwitterError(headers, TwitterErrors { errors }))
+                            if ignore_over_capacity_errors =>
+                        {
+                            if errors.len() == 1 && errors[0].code == OVER_CAPACITY_ERROR_CODE {
+                                log::warn!(
+                                    "Waiting for {:?} after over capacity error",
+                                    over_capacity_delay
+                                );
+                                tokio::time::sleep(over_capacity_delay).await;
+                                None
+                            } else {
+                                Some(Err(Error::TwitterError(headers, TwitterErrors { errors })))
+                            }
+                        }
+                        Err(error) => Some(Err(error)),
+                    }
+                }
+            })
+            .boxed_local()
     }
 }

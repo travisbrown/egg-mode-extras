@@ -6,9 +6,8 @@ use egg_mode::{
 };
 use futures::{future::LocalBoxFuture, FutureExt, TryFutureExt};
 use serde::de::DeserializeOwned;
-use std::iter::Peekable;
 
-type ResponseFuture<'a, T> = LocalBoxFuture<'a, Result<Response<T>>>;
+pub(crate) type ResponseFuture<'a, T> = LocalBoxFuture<'a, Result<Response<T>>>;
 
 pub trait Pageable<'a> {
     type Item: 'static;
@@ -17,21 +16,6 @@ pub trait Pageable<'a> {
     fn load(&mut self) -> ResponseFuture<'a, Self::Page>;
     fn update(&mut self, response: &mut Response<Self::Page>) -> bool;
     fn extract(page: Self::Page) -> Vec<Self::Item>;
-}
-
-impl<'a, T: 'static, I: Iterator<Item = ResponseFuture<'a, Vec<T>>>> Pageable<'a> for Peekable<I> {
-    type Item = T;
-    type Page = Vec<T>;
-
-    fn load(&mut self) -> ResponseFuture<'a, Self::Page> {
-        self.next().unwrap()
-    }
-    fn update(&mut self, _response: &mut Response<Self::Page>) -> bool {
-        self.peek().is_none()
-    }
-    fn extract(page: Self::Page) -> Vec<Self::Item> {
-        page
-    }
 }
 
 impl<T: Cursor + DeserializeOwned + 'static> Pageable<'static> for CursorIter<T> {

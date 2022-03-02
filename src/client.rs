@@ -308,10 +308,11 @@ impl Client {
         token_type: TokenType,
     ) -> LocalBoxStream<EggModeResult<Result<serde_json::Value, (UserID, FormerUserStatus)>>> {
         let (sender, receiver) = futures::channel::mpsc::channel(MISSING_USER_ID_BUFFER_SIZE);
+        let mut closing_sender = sender.clone();
 
         let values = self
             .lookup_users_json_or_missing(accounts, token_type)
-            .try_filter_map(move |result| {
+            .and_then(move |result| {
                 let mut sender = sender.clone();
 
                 async move {
@@ -324,7 +325,12 @@ impl Client {
                         }
                     }
                 }
-            });
+            })
+            .chain(futures::stream::once(async move {
+                closing_sender.close_channel();
+                Ok(None)
+            }))
+            .try_filter_map(futures::future::ok);
 
         let missing = self.choose_limit_tracker(token_type).wrap_stream(
             receiver.map(move |user_id| {

@@ -9,7 +9,9 @@ use egg_mode::{
     user::{TwitterUser, UserID},
     KeyPair, RateLimit, Response, Token,
 };
-use futures::{stream::LocalBoxStream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{
+    sink::SinkExt, stream::LocalBoxStream, FutureExt, StreamExt, TryFutureExt, TryStreamExt,
+};
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::path::Path;
@@ -25,8 +27,10 @@ const USER_FOLLOWER_IDS_PAGE_SIZE: i32 = 5000;
 const USER_FOLLOWED_IDS_PAGE_SIZE: i32 = 5000;
 const USER_LOOKUP_PAGE_SIZE: usize = 100;
 const USER_TIMELINE_PAGE_SIZE: i32 = 200;
+const MISSING_USER_ID_BUFFER_SIZE: usize = 1024 * 1024;
 
 const USER_LOOKUP_URL: &str = "https://api.twitter.com/1.1/users/lookup.json";
+const USER_SHOW_URL: &str = "https://api.twitter.com/1.1/users/show.json";
 
 /// Represents the type of token.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -248,7 +252,10 @@ impl Client {
         }
 
         self.choose_limit_tracker(token_type)
-            .make_stream(lookups.into_iter().peekable(), Method::USER_LOOKUP)
+            .wrap_stream(futures::stream::iter(lookups), Method::USER_LOOKUP, true)
+            .map_ok(|values| futures::stream::iter(values.into_iter().map(Ok)))
+            .try_flatten()
+            .boxed_local()
     }
 
     /// Stream user JSON objects (or their IDs if they are unavailable).
@@ -274,7 +281,10 @@ impl Client {
         }
 
         self.choose_limit_tracker(token_type)
-            .make_stream(lookups.into_iter().peekable(), Method::USER_LOOKUP)
+            .wrap_stream(futures::stream::iter(lookups), Method::USER_LOOKUP, true)
+            .map_ok(|values| futures::stream::iter(values.into_iter().map(Ok)))
+            .try_flatten()
+            .boxed_local()
     }
 
     /// Stream user JSON objects (or their IDs if they are unavailable).
@@ -286,6 +296,51 @@ impl Client {
         self.lookup_users_json_or_missing(accounts, token_type)
             .try_filter_map(|result| futures::future::ok(result.ok()))
             .boxed_local()
+    }
+
+    /// Stream user JSON objects (or their IDs if they are unavailable).
+    pub fn lookup_users_json_or_status<
+        T: Into<UserID> + Unpin + Send,
+        I: IntoIterator<Item = T>,
+    >(
+        &self,
+        accounts: I,
+        token_type: TokenType,
+    ) -> LocalBoxStream<EggModeResult<Result<serde_json::Value, (UserID, FormerUserStatus)>>> {
+        let (sender, receiver) = futures::channel::mpsc::channel(MISSING_USER_ID_BUFFER_SIZE);
+
+        let values = self
+            .lookup_users_json_or_missing(accounts, token_type)
+            .try_filter_map(move |result| {
+                let mut sender = sender.clone();
+
+                async move {
+                    match result {
+                        Ok(value) => Ok(Some(Ok(value))),
+                        Err(user_id) => {
+                            // TODO: This shouldn't happen but should also be handled better.
+                            sender.feed(user_id).await.unwrap();
+                            Ok(None)
+                        }
+                    }
+                }
+            });
+
+        let missing = self.choose_limit_tracker(token_type).wrap_stream(
+            receiver.map(move |user_id| {
+                user_show_json(user_id.clone(), self.choose_token(token_type))
+                    .map_ok(move |response| {
+                        Response::map(response, |result| {
+                            result.map_err(|status| (user_id, status))
+                        })
+                    })
+                    .boxed_local()
+            }),
+            Method::USER_SHOW,
+            true,
+        );
+
+        futures::stream::select(values, missing).boxed_local()
     }
 
     /// Stream either user profiles or former user statuses.
@@ -302,7 +357,7 @@ impl Client {
             lookups.push(
                 egg_mode::user::show(id.clone(), token)
                     .map(move |result| match result {
-                        Ok(response) => Ok(Response::map(response, |user| vec![Ok(user)])),
+                        Ok(response) => Ok(Response::map(response, Ok)),
                         Err(error) => {
                             match error {
                                 EggModeError::TwitterError(
@@ -316,7 +371,7 @@ impl Client {
                                     let user_status =
                                         errors[0].code.try_into().map_err(|_| error)?;
 
-                                    Ok(Response::new(limit, vec![Err((id, user_status))]))
+                                    Ok(Response::new(limit, Err((id, user_status))))
                                 }
                                 other => Err(other),
                             }
@@ -327,7 +382,8 @@ impl Client {
         }
 
         self.choose_limit_tracker(token_type)
-            .make_stream(lookups.into_iter().peekable(), Method::USER_SHOW)
+            .wrap_stream(futures::stream::iter(lookups), Method::USER_SHOW, true)
+            .boxed_local()
     }
 
     /// Attempt to find a tweet that the tweet with the given status ID is a reply to.
@@ -411,11 +467,43 @@ pub fn make_timeline_stream(
     .boxed_local()
 }
 
+/// Essentially `egg_mode::user::show` but returning raw JSON or status of missing user.
+async fn user_show_json<T: Into<UserID>>(
+    account: T,
+    token: &Token,
+) -> EggModeResult<Response<Result<serde_json::Value, FormerUserStatus>>> {
+    let params = egg_mode::raw::ParamList::new()
+        .extended_tweets()
+        .add_user_param(account.into());
+
+    let request = egg_mode::raw::request_post(USER_SHOW_URL, token, Some(&params));
+
+    match egg_mode::raw::response_json::<serde_json::Value>(request).await {
+        Ok(response) => Ok(Response::map(response, Ok)),
+        Err(error) => {
+            match error {
+                EggModeError::TwitterError(ref headers, TwitterErrors { ref errors })
+                    if errors.len() == 1 =>
+                {
+                    let limit = extract_rate_limit(headers);
+
+                    // If the error code isn't 50 or 63 we just pass along the
+                    // error.
+                    let user_status = errors[0].code.try_into().map_err(|_| error)?;
+
+                    Ok(Response::new(limit, Err(user_status)))
+                }
+                other => Err(other),
+            }
+        }
+    }
+}
+
 /// Essentially `egg_mode::user::lookup` but returning raw JSON and IDs of missing users.
 async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
     accounts: I,
     token: &Token,
-) -> Result<Response<(Vec<serde_json::Value>, Vec<UserID>)>, EggModeError> {
+) -> EggModeResult<Response<(Vec<serde_json::Value>, Vec<UserID>)>> {
     let mut ids = HashSet::new();
     let mut screen_names = HashSet::new();
 
@@ -489,7 +577,7 @@ async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
 async fn user_lookup_json_flat<T: Into<UserID>, I: IntoIterator<Item = T>>(
     accounts: I,
     token: &Token,
-) -> Result<Response<Vec<Result<serde_json::Value, UserID>>>, EggModeError> {
+) -> EggModeResult<Response<Vec<Result<serde_json::Value, UserID>>>> {
     let response = user_lookup_json(accounts, token).await?;
 
     Ok(Response::map(response, |(values, missing)| {

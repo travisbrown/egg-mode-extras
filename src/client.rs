@@ -10,6 +10,7 @@ use egg_mode::{
     KeyPair, RateLimit, Response, Token,
 };
 use futures::{stream::LocalBoxStream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::path::Path;
 use std::time::Duration;
@@ -250,12 +251,15 @@ impl Client {
             .make_stream(lookups.into_iter().peekable(), Method::USER_LOOKUP)
     }
 
-    /// Stream user JSON objects.
-    pub fn lookup_users_json<T: Into<UserID> + Unpin + Send, I: IntoIterator<Item = T>>(
+    /// Stream user JSON objects (or their IDs if they are unavailable).
+    pub fn lookup_users_json_or_missing<
+        T: Into<UserID> + Unpin + Send,
+        I: IntoIterator<Item = T>,
+    >(
         &self,
         accounts: I,
         token_type: TokenType,
-    ) -> LocalBoxStream<EggModeResult<serde_json::Value>> {
+    ) -> LocalBoxStream<EggModeResult<Result<serde_json::Value, UserID>>> {
         let token = self.choose_token(token_type);
         let mut lookups = vec![];
 
@@ -266,15 +270,22 @@ impl Client {
         let chunks = user_ids.chunks(USER_LOOKUP_PAGE_SIZE);
 
         for chunk in chunks {
-            lookups.push(
-                user_lookup_json(chunk.to_vec(), token)
-                    .map(recover_user_lookup)
-                    .boxed_local(),
-            );
+            lookups.push(user_lookup_json_flat(chunk.to_vec(), token).boxed_local());
         }
 
         self.choose_limit_tracker(token_type)
             .make_stream(lookups.into_iter().peekable(), Method::USER_LOOKUP)
+    }
+
+    /// Stream user JSON objects (or their IDs if they are unavailable).
+    pub fn lookup_users_json<T: Into<UserID> + Unpin + Send, I: IntoIterator<Item = T>>(
+        &self,
+        accounts: I,
+        token_type: TokenType,
+    ) -> LocalBoxStream<EggModeResult<serde_json::Value>> {
+        self.lookup_users_json_or_missing(accounts, token_type)
+            .try_filter_map(|result| futures::future::ok(result.ok()))
+            .boxed_local()
     }
 
     /// Stream either user profiles or former user statuses.
@@ -400,29 +411,35 @@ pub fn make_timeline_stream(
     .boxed_local()
 }
 
-/// Convenience method copied from egg-mode.
-fn multiple_names_param<T: Into<UserID>, I: IntoIterator<Item = T>>(
-    accounts: I,
-) -> (String, String) {
-    let mut ids = Vec::new();
-    let mut screen_names = Vec::new();
-
-    for account in accounts {
-        match account.into() {
-            UserID::ID(id) => ids.push(id.to_string()),
-            UserID::ScreenName(screen_name) => screen_names.push(screen_name),
-        }
-    }
-
-    (ids.join(","), screen_names.join(","))
-}
-
-/// Essentially `egg_mode::user::lookup` but returning raw JSON.
+/// Essentially `egg_mode::user::lookup` but returning raw JSON and IDs of missing users.
 async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
     accounts: I,
     token: &Token,
-) -> EggModeResult<Response<Vec<serde_json::Value>>> {
-    let (id_param, screen_name_param) = multiple_names_param(accounts);
+) -> Result<Response<(Vec<serde_json::Value>, Vec<UserID>)>, EggModeError> {
+    let mut ids = HashSet::new();
+    let mut screen_names = HashSet::new();
+
+    let mut id_param = String::new();
+    let mut screen_name_param = String::new();
+
+    for account in accounts {
+        match account.into() {
+            UserID::ID(id) => {
+                ids.insert(id);
+                id_param.push_str(&id.to_string());
+                id_param.push(',');
+            }
+            UserID::ScreenName(screen_name) => {
+                screen_names.insert(screen_name.to_lowercase());
+                screen_name_param.push_str(&screen_name);
+                screen_name_param.push(',');
+            }
+        }
+    }
+
+    // Remove the trailing commas if needed
+    id_param.pop();
+    screen_name_param.pop();
 
     let params = egg_mode::raw::ParamList::new()
         .extended_tweets()
@@ -430,8 +447,65 @@ async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
         .add_param("screen_name", screen_name_param);
 
     let request = egg_mode::raw::request_post(USER_LOOKUP_URL, token, Some(&params));
+    let response =
+        recover_user_lookup(egg_mode::raw::response_json::<Vec<serde_json::Value>>(request).await)?;
 
-    egg_mode::raw::response_json(request).await
+    for value in &response.response {
+        let user_id = value
+            .get("id_str")
+            .and_then(|id_str_value| id_str_value.as_str())
+            .and_then(|id_str| id_str.parse::<u64>().ok())
+            .ok_or_else(|| {
+                EggModeError::InvalidResponse("Missing id_str", Some(value.to_string()))
+            })?;
+
+        // If we didn't find the user ID, we need to try the screen name
+        if !ids.remove(&user_id) {
+            let screen_name = value
+                .get("screen_name")
+                .and_then(|screen_name_value| screen_name_value.as_str())
+                .ok_or_else(|| {
+                    EggModeError::InvalidResponse("Missing screen name", Some(value.to_string()))
+                })?;
+
+            screen_names.remove(&screen_name.to_lowercase());
+        }
+    }
+
+    let mut missing = Vec::with_capacity(ids.len() + screen_names.len());
+
+    for id in ids {
+        missing.push(UserID::ID(id));
+    }
+
+    for screen_name in screen_names {
+        missing.push(UserID::ScreenName(screen_name.into()));
+    }
+
+    Ok(Response::map(response, |values| (values, missing)))
+}
+
+/// Essentially `egg_mode::user::lookup` but returning intermixed raw JSON and IDs of missing users.
+async fn user_lookup_json_flat<T: Into<UserID>, I: IntoIterator<Item = T>>(
+    accounts: I,
+    token: &Token,
+) -> Result<Response<Vec<Result<serde_json::Value, UserID>>>, EggModeError> {
+    let response = user_lookup_json(accounts, token).await?;
+
+    Ok(Response::map(response, |(values, missing)| {
+        let mut results: Vec<Result<serde_json::Value, UserID>> =
+            Vec::with_capacity(values.len() + missing.len());
+
+        for value in values {
+            results.push(Ok(value));
+        }
+
+        for id in missing {
+            results.push(Err(id));
+        }
+
+        results
+    }))
 }
 
 /// We just use the defaults if the headers are malformed for some reason.

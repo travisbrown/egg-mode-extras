@@ -476,7 +476,7 @@ async fn user_show_json<T: Into<UserID>>(
         .extended_tweets()
         .add_user_param(account.into());
 
-    let request = egg_mode::raw::request_post(USER_SHOW_URL, token, Some(&params));
+    let request = egg_mode::raw::request_get(USER_SHOW_URL, token, Some(&params));
 
     match egg_mode::raw::response_json::<serde_json::Value>(request).await {
         Ok(response) => Ok(Response::map(response, Ok)),

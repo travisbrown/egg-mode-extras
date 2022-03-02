@@ -12,7 +12,7 @@ pub enum Error {
     /// unexpected Twitter API error code: {0}
     UnexpectedTwitterErrorCode(i32),
     /// an error occurred in the HTTP client: {0}
-    HttpClientError(#[from] reqwest::Error),
+    HttpClient(#[from] reqwest::Error),
     /// a failure occurred when parsing a tweet id string: {0}
-    TweetIDParseError(String),
+    TweetIDParse(String),
 }

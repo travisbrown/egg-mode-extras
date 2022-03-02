@@ -51,6 +51,10 @@ impl RateLimitTracker {
                         res
                     } else {
                         if is_over_capacity {
+                            log::warn!(
+                                "Waiting for {:?} after over capacity error",
+                                over_capacity_delay
+                            );
                             tokio::time::sleep(over_capacity_delay).await;
                         }
 
@@ -127,6 +131,10 @@ impl RateLimitTracker {
                             if ignore_over_capacity_errors =>
                         {
                             if errors.len() == 1 && errors[0].code == OVER_CAPACITY_ERROR_CODE {
+                                log::warn!(
+                                    "Waiting for {:?} after over capacity error",
+                                    over_capacity_delay
+                                );
                                 tokio::time::sleep(over_capacity_delay).await;
                                 None
                             } else {

@@ -441,6 +441,13 @@ impl Client {
         .try_flatten()
         .boxed_local()
     }
+
+    /// Block the specified account for the authenticated user.
+    pub async fn block_user<T: Into<UserID>>(&self, account: T) -> EggModeResult<TwitterUser> {
+        egg_mode::user::block(account, &self.user_token)
+            .map_ok(|response| response.response)
+            .await
+    }
 }
 
 /// Asynchronously stream a timeline.

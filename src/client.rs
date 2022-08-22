@@ -116,6 +116,11 @@ impl Client {
         Ok(Self::from_key_pairs(consumer, access).await?)
     }
 
+    /// Twitter ID of the authenticated user.
+    pub fn user_id(&self) -> u64 {
+        self.user.id
+    }
+
     /// Stream user IDs blocked by the authenticated user.
     pub fn blocked_ids(&self) -> LocalBoxStream<EggModeResult<u64>> {
         let cursor = egg_mode::user::blocks_ids(&self.user_token);

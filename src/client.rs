@@ -233,6 +233,22 @@ impl Client {
             .await
     }
 
+    /// Look up a single user (or their status if they are unavailable).
+    pub async fn lookup_user_or_status<T: Into<UserID>>(
+        &self,
+        account: T,
+        token_type: TokenType,
+    ) -> EggModeResult<Result<TwitterUser, FormerUserStatus>> {
+        let token = self.choose_token(token_type);
+        egg_mode::user::show(account, token)
+            .await
+            .map(|response| Ok(response.response))
+            .or_else(|error| {
+                extract_twitter_error_info(error, |code| FormerUserStatus::try_from(code).ok())
+                    .map(|(_, user_status)| Err(user_status))
+            })
+    }
+
     /// Stream users.
     pub fn lookup_users<T: Into<UserID> + Unpin + Send, I: IntoIterator<Item = T>>(
         &self,
@@ -371,24 +387,10 @@ impl Client {
                 egg_mode::user::show(id.clone(), token)
                     .map(move |result| match result {
                         Ok(response) => Ok(Response::map(response, Ok)),
-                        Err(error) => {
-                            match error {
-                                EggModeError::TwitterError(
-                                    ref headers,
-                                    TwitterErrors { ref errors },
-                                ) if errors.len() == 1 => {
-                                    let limit = extract_rate_limit(headers);
-
-                                    // If the error code isn't 50 or 63 we just pass along the
-                                    // error.
-                                    let user_status =
-                                        errors[0].code.try_into().map_err(|_| error)?;
-
-                                    Ok(Response::new(limit, Err((id, user_status))))
-                                }
-                                other => Err(other),
-                            }
-                        }
+                        Err(error) => extract_twitter_error_info(error, |code| {
+                            FormerUserStatus::try_from(code).ok()
+                        })
+                        .map(|(limit, user_status)| Response::new(limit, Err((id, user_status)))),
                     })
                     .boxed_local(),
             );
@@ -501,20 +503,8 @@ async fn user_show_json<T: Into<UserID>>(
     match egg_mode::raw::response_json::<serde_json::Value>(request).await {
         Ok(response) => Ok(Response::map(response, Ok)),
         Err(error) => {
-            match error {
-                EggModeError::TwitterError(ref headers, TwitterErrors { ref errors })
-                    if errors.len() == 1 =>
-                {
-                    let limit = extract_rate_limit(headers);
-
-                    // If the error code isn't 50 or 63 we just pass along the
-                    // error.
-                    let user_status = errors[0].code.try_into().map_err(|_| error)?;
-
-                    Ok(Response::new(limit, Err(user_status)))
-                }
-                other => Err(other),
-            }
+            extract_twitter_error_info(error, |code| FormerUserStatus::try_from(code).ok())
+                .map(|(limit, user_status)| Response::new(limit, Err(user_status)))
         }
     }
 }
@@ -616,29 +606,39 @@ async fn user_lookup_json_flat<T: Into<UserID>, I: IntoIterator<Item = T>>(
     }))
 }
 
-/// We just use the defaults if the headers are malformed for some reason.
-fn extract_rate_limit(headers: &egg_mode::raw::Headers) -> RateLimit {
-    RateLimit::try_from(headers).unwrap_or(RateLimit {
-        limit: -1,
-        remaining: -1,
-        reset: -1,
-    })
+/// Return rate limit information and error code if this is an error from Twitter.
+fn extract_twitter_error_info<T, F: Fn(i32) -> Option<T>>(
+    error: EggModeError,
+    code_filter_map: F,
+) -> Result<(RateLimit, T), EggModeError> {
+    match error {
+        EggModeError::TwitterError(ref headers, TwitterErrors { ref errors }) => {
+            if errors.len() == 1 {
+                let limit = RateLimit::try_from(headers)?;
+
+                code_filter_map(errors[0].code)
+                    .ok_or(error)
+                    .map(|code| (limit, code))
+            } else {
+                Err(error)
+            }
+        }
+        other => Err(other),
+    }
 }
 
 /// Recover from "No user matches" errors.
 fn recover_user_lookup<T>(
     result: EggModeResult<Response<Vec<T>>>,
 ) -> EggModeResult<Response<Vec<T>>> {
-    result.or_else(|error| match error {
-        EggModeError::TwitterError(ref headers, TwitterErrors { ref errors }) => {
-            if errors.len() == 1 && errors[0].code == NO_USER_MATCHES_ERROR_CODE {
-                let limit = extract_rate_limit(headers);
-
-                Ok(Response::new(limit, vec![]))
+    result.or_else(|error| {
+        extract_twitter_error_info(error, |code| {
+            if code == NO_USER_MATCHES_ERROR_CODE {
+                Some(())
             } else {
-                Err(error)
+                None
             }
-        }
-        other => Err(other),
+        })
+        .map(|(limit, _)| Response::new(limit, vec![]))
     })
 }

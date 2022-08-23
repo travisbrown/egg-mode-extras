@@ -1,6 +1,6 @@
 [package]
 name = "egg-mode-extras"
-version = "0.2.3"
+version = "0.3.0"
 authors = ["Travis Brown <travisrobertbrown@gmail.com>"]
 description = "Rate-limited streams and other helpers for egg-mode"
 homepage = "https://github.com/travisbrown/egg-mode-extras"

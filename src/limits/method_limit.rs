@@ -23,7 +23,7 @@ impl MethodLimit {
     const DEFAULT_ORDERING: Ordering = Ordering::SeqCst;
 
     // Being careful about clock differences.
-    const WAIT_BUFFER_SECONDS: i64 = 10;
+    const WAIT_BUFFER_SECONDS: i64 = 60;
 
     /// The number of remaining requests before the next reset.
     pub fn remaining(&self) -> i32 {

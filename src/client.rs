@@ -497,6 +497,7 @@ async fn user_show_json<T: Into<UserID>>(
     let params = egg_mode::raw::ParamList::new()
         .extended_tweets()
         .add_param("include_ext_is_blue_verified", "1")
+        .add_param("include_ext_has_nft_avatar", "1")
         .add_user_param(account.into());
 
     let request = egg_mode::raw::request_get(USER_SHOW_URL, token, Some(&params));
@@ -543,6 +544,7 @@ async fn user_lookup_json<T: Into<UserID>, I: IntoIterator<Item = T>>(
     let params = egg_mode::raw::ParamList::new()
         .extended_tweets()
         .add_param("include_ext_is_blue_verified", "1")
+        .add_param("include_ext_has_nft_avatar", "1")
         .add_param("user_id", id_param)
         .add_param("screen_name", screen_name_param);
 

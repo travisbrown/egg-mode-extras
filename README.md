@@ -1,6 +1,6 @@
 # egg-mode-extras
 
-[![Rust build status](https://img.shields.io/github/workflow/status/travisbrown/egg-mode-extras/rust-ci.svg?label=rust)](https://github.com/travisbrown/egg-mode-extras/actions)
+[![Rust build status](https://img.shields.io/github/actions/workflow/status/travisbrown/egg-mode-extras/ci.yaml?branch=main)](https://github.com/travisbrown/egg-mode-extras/actions)
 [![Coverage status](https://img.shields.io/codecov/c/github/travisbrown/egg-mode-extras/main.svg)](https://codecov.io/github/travisbrown/egg-mode-extras)
 
 This project includes some tools that can be useful for working with [egg-mode][egg-mode],

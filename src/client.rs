@@ -77,7 +77,7 @@ pub struct Client {
 }
 
 impl Client {
-    async fn new(
+    pub async fn new(
         user: TwitterUser,
         user_token: Token,
         app_token: Token,
@@ -114,6 +114,60 @@ impl Client {
         let (consumer, access) = config.twitter_key_pairs();
 
         Ok(Self::from_key_pairs(consumer, access).await?)
+    }
+
+    pub async fn from_bearer_token(
+        token: &str,
+    ) -> std::result::Result<Self, egg_mode::error::Error> {
+        let empty_user = egg_mode::user::TwitterUser {
+            contributors_enabled: true,
+            created_at: chrono::DateTime::<chrono::Utc>::MAX_UTC,
+            default_profile: false,
+            default_profile_image: false,
+            description: None,
+            entities: egg_mode::user::UserEntities {
+                description: egg_mode::user::UserEntityDetail { urls: vec![] },
+                url: None,
+            },
+            favourites_count: 0,
+            follow_request_sent: None,
+            followers_count: 0,
+            friends_count: 0,
+            geo_enabled: false,
+            id: 0,
+            is_translator: false,
+            lang: None,
+            listed_count: 0,
+            location: None,
+            name: "".to_string(),
+            profile_background_color: "".to_string(),
+            profile_background_image_url: None,
+            profile_background_image_url_https: None,
+            profile_background_tile: None,
+            profile_banner_url: None,
+            profile_image_url: "".to_string(),
+            profile_image_url_https: "".to_string(),
+            profile_link_color: "".to_string(),
+            profile_sidebar_border_color: "".to_string(),
+            profile_sidebar_fill_color: "".to_string(),
+            profile_text_color: "".to_string(),
+            profile_use_background_image: false,
+            protected: false,
+            screen_name: "".to_string(),
+            show_all_inline_media: None,
+            status: None,
+            statuses_count: 0,
+            time_zone: None,
+            url: None,
+            utc_offset: None,
+            verified: false,
+            withheld_in_countries: None,
+            withheld_scope: None,
+        };
+
+        let token = Token::Bearer(token.to_string());
+
+        Self::new(empty_user, token.clone(), token).await
     }
 
     /// Twitter ID of the authenticated user.
